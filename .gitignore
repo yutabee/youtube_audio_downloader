@@ -1,0 +1,107 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Downloaded Files
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.opus
+*.vorbis
+*.aac
+*.webm
+*.mp4
+*.mkv
+*.txt
+*.vtt
+*.srt
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Logs
+*.log
+logs/
+
+# YouTube Downloader Specific
+.youtube_audio_downloader/
+downloaded.txt
+cookies.txt
+*.part
+*.ytdl
+*.temp
+*.tmp
+
+# Archive files
+archive.txt
+download_archive.txt
+
+# Config files (may contain sensitive data)
+config.json
+config.yaml
+config.yml
+settings.json
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Test files
+test_*
+*_test.*
+tests/
+
+# Coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
