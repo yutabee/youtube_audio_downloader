@@ -64,23 +64,38 @@ class ImprovedMelodyExtractor:
         print(f"Audio loaded: {len(self.y)} samples at {self.sr} Hz")
         
     def separate_vocals(self):
-        """ボーカルを分離（簡易版）"""
+        """ボーカルを分離（改良版）"""
         print("Separating vocal components...")
         
-        # ハーモニック成分を抽出
-        y_harmonic, y_percussive = librosa.effects.hpss(self.y, margin=3.0)
+        # ハーモニック成分を抽出（より強力な設定）
+        y_harmonic, y_percussive = librosa.effects.hpss(
+            self.y, 
+            margin=(1.0, 5.0),  # ハーモニック成分を優先
+            kernel_size=31      # より大きなカーネルサイズ
+        )
         
         # 中域を強調（ボーカル帯域）
         # バターワースフィルタでボーカル帯域を抽出
         from scipy import signal
         
-        # バンドパスフィルタ設計（100Hz - 2000Hz）
+        # バンドパスフィルタ設計（ボーカル帯域を広めに）
         nyquist = self.sr / 2
-        low = 100 / nyquist
-        high = 2000 / nyquist
+        low = 80 / nyquist     # 80Hz（男性ボーカルの下限）
+        high = 2000 / nyquist  # 2000Hz（倍音を含む）
         
+        # フィルタ次数を適度に
         b, a = signal.butter(4, [low, high], btype='band')
-        self.y_vocal = signal.filtfilt(b, a, y_harmonic)
+        
+        # NaNチェック
+        y_harmonic = np.nan_to_num(y_harmonic, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        try:
+            self.y_vocal = signal.filtfilt(b, a, y_harmonic)
+            # フィルタ後もNaNチェック
+            self.y_vocal = np.nan_to_num(self.y_vocal, nan=0.0, posinf=0.0, neginf=0.0)
+        except:
+            # フィルタが失敗した場合は元のデータを使用
+            self.y_vocal = y_harmonic
         
         print("Vocal separation completed")
         
@@ -231,12 +246,23 @@ class ImprovedMelodyExtractor:
         if not notes:
             return notes
             
-        # 音域でフィルタ（C3-C6の範囲内）
+        # 音域でフィルタ（より厳密な範囲）
         filtered = []
         
-        for note in notes:
-            # 極端な音域を除外
-            if note.octave < 3 or note.octave > 5:
+        # 最初の数音は誤検出の可能性が高いので除外
+        start_skip = min(3, len(notes) // 20)
+        
+        for i, note in enumerate(notes):
+            # 最初の数音をスキップ
+            if i < start_skip:
+                continue
+                
+            # 極端な音域を除外（C#7などの明らかな誤検出を防ぐ）
+            if note.octave < 2 or note.octave > 5:
+                continue
+                
+            # C2のような低すぎる音も除外
+            if note.midi_note < 48:  # C3未満
                 continue
                 
             # 極端に短い音符を除外
@@ -246,6 +272,12 @@ class ImprovedMelodyExtractor:
             # 低信頼度を除外
             if note.confidence < 0.5:
                 continue
+                
+            # 前後の音との差が極端な場合は除外（2.5オクターブ以上）
+            if len(filtered) > 0:  # 既にフィルタされた音と比較
+                prev_note = filtered[-1]
+                if abs(note.midi_note - prev_note.midi_note) > 30:
+                    continue
                 
             filtered.append(note)
             
