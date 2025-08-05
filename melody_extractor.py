@@ -13,8 +13,10 @@ import argparse
 import sys
 from pathlib import Path
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional
+import json
+from datetime import datetime
 
 # 音名の定義
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -23,9 +25,9 @@ NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 A4_FREQ = 440.0
 A4_MIDI = 69
 
-# ボーカル音域の制限（より現実的な範囲）
+# ボーカル音域の制限（より広い範囲に拡張）
 VOCAL_FMIN = librosa.note_to_hz('C3')  # 約130Hz（男性の低音）
-VOCAL_FMAX = librosa.note_to_hz('C6')  # 約1047Hz（女性の高音）
+VOCAL_FMAX = librosa.note_to_hz('C7')  # 約2093Hz（高音域を拡張、G5を含む）
 
 
 @dataclass
@@ -78,10 +80,10 @@ class ImprovedMelodyExtractor:
         # バターワースフィルタでボーカル帯域を抽出
         from scipy import signal
         
-        # バンドパスフィルタ設計（ボーカル帯域を広めに）
+# バンドパスフィルタ設計（ボーカル帯域を広めに）
         nyquist = self.sr / 2
         low = 80 / nyquist     # 80Hz（男性ボーカルの下限）
-        high = 2000 / nyquist  # 2000Hz（倍音を含む）
+        high = 4000 / nyquist  # 4000Hz（高音域の倍音を含む、G5は約784Hz）
         
         # フィルタ次数を適度に
         b, a = signal.butter(4, [low, high], btype='band')
@@ -120,6 +122,18 @@ class ImprovedMelodyExtractor:
             fill_na=0
         )
         
+        # デバッグ情報
+        valid_f0 = f0[f0 > 0]
+        if len(valid_f0) > 0:
+            print(f"Raw pitch range: {valid_f0.min():.1f}Hz - {valid_f0.max():.1f}Hz")
+            high_notes = valid_f0[valid_f0 > 600]  # 600Hz以上の高音
+            if len(high_notes) > 0:
+                print(f"High notes detected: {len(high_notes)} frames above 600Hz")
+                print(f"Highest pitch: {high_notes.max():.1f}Hz")
+                g5_notes = valid_f0[valid_f0 > 750]  # G5周辺（約784Hz）
+                if len(g5_notes) > 0:
+                    print(f"G5 range notes: {len(g5_notes)} frames above 750Hz")
+        
         return f0, voiced_probs, hop_length
         
     def freq_to_note(self, freq: float) -> Tuple[str, int, int]:
@@ -153,8 +167,8 @@ class ImprovedMelodyExtractor:
             window_pitches = pitches[start:end]
             window_confs = confidences[start:end]
             
-            # 信頼度が0.5以上のピッチのみ使用
-            valid_mask = (window_pitches > 0) & (window_confs > 0.5)
+            # 信頼度が0.3以上のピッチのみ使用（高音域の検出を改善）
+            valid_mask = (window_pitches > 0) & (window_confs > 0.3)
             
             if np.any(valid_mask):
                 # 信頼度で重み付けした平均
@@ -167,7 +181,7 @@ class ImprovedMelodyExtractor:
         return smoothed
         
     def segment_notes_advanced(self, pitches: np.ndarray, confidences: np.ndarray, 
-                              hop_length: int, min_duration: float = 0.08) -> List[Note]:
+                              hop_length: int, min_duration: float = 0.04) -> List[Note]:
         """
         高度なノートセグメンテーション（信頼度を考慮）
         """
@@ -180,8 +194,19 @@ class ImprovedMelodyExtractor:
         frame_to_time = hop_length / self.sr
         min_frames = int(min_duration / frame_to_time)
         
+        # デバッグ用カウンタ
+        high_pitch_count = 0
+        high_pitch_low_conf = 0
+        
         for i, (pitch, conf) in enumerate(zip(pitches, confidences)):
-            if pitch > 0 and conf > 0.3:  # 信頼度閾値
+            if pitch > 750:  # G5付近のデバッグ
+                if conf > 0.15:
+                    high_pitch_count += 1
+                else:
+                    high_pitch_low_conf += 1
+                    
+            if pitch > 0 and conf > 0.15:  # 信頼度閾値をさらに下げて高音域も検出
+                    
                 note_info = self.freq_to_note(pitch)
                 if note_info[0] is not None:
                     midi_note = note_info[2]
@@ -238,16 +263,20 @@ class ImprovedMelodyExtractor:
                 current_note = None
                 note_pitches = []
                 note_confs = []
+        
+        print(f"During segmentation: {high_pitch_count} frames with pitch > 750Hz were processed")
+        print(f"                     {high_pitch_low_conf} frames with pitch > 750Hz had low confidence (<0.15)")
                 
         return notes
         
-    def filter_notes(self, notes: List[Note]) -> List[Note]:
+    def filter_notes(self, notes: List[Note], debug: bool = False) -> List[Note]:
         """ノートをフィルタリング（異常値を除去）"""
         if not notes:
             return notes
             
         # 音域でフィルタ（より厳密な範囲）
         filtered = []
+        high_notes_filtered = 0
         
         # 最初の数音は誤検出の可能性が高いので除外
         start_skip = min(3, len(notes) // 20)
@@ -257,8 +286,8 @@ class ImprovedMelodyExtractor:
             if i < start_skip:
                 continue
                 
-            # 極端な音域を除外（C#7などの明らかな誤検出を防ぐ）
-            if note.octave < 2 or note.octave > 5:
+            # 極端な音域を除外（ただしG5は含める）
+            if note.octave < 2 or note.octave > 6:
                 continue
                 
             # C2のような低すぎる音も除外
@@ -269,17 +298,24 @@ class ImprovedMelodyExtractor:
             if note.duration < 0.05:
                 continue
                 
-            # 低信頼度を除外
-            if note.confidence < 0.5:
+            # 低信頼度を除外（高音域は信頼度が低いことがあるので調整）
+            if note.confidence < 0.2:  # 閾値を下げる
+                if note.pitch > 600:
+                    high_notes_filtered += 1
                 continue
                 
-            # 前後の音との差が極端な場合は除外（2.5オクターブ以上）
+            # 前後の音との差が極端な場合は除外（3オクターブ以上に緩和）
             if len(filtered) > 0:  # 既にフィルタされた音と比較
                 prev_note = filtered[-1]
-                if abs(note.midi_note - prev_note.midi_note) > 30:
+                if abs(note.midi_note - prev_note.midi_note) > 36:  # 3オクターブ
+                    if note.pitch > 600:
+                        high_notes_filtered += 1
                     continue
                 
             filtered.append(note)
+        
+        if debug and high_notes_filtered > 0:
+            print(f"Filtered out {high_notes_filtered} high notes (>600Hz) during filtering")
             
         return filtered
         
@@ -299,24 +335,44 @@ class ImprovedMelodyExtractor:
         # ピッチ抽出
         pitches, confidences, hop_length = self.extract_pitches_pyin()
         
-        # ピッチをスムージング
-        pitches = self.smooth_pitches_advanced(pitches, confidences)
+        # スムージング前のデバッグ
+        high_before = np.sum(pitches > 750)
+        print(f"Before smoothing: {high_before} frames with pitch > 750Hz")
+        
+        # ピッチをスムージング - 高音域を保持するため無効化
+        # pitches = self.smooth_pitches_advanced(pitches, confidences, window_size=3)
+        # スムージングを無効化して高音域を保持
+        
+        # スムージング後のデバッグ
+        high_after = np.sum(pitches > 750)
+        print(f"After smoothing: {high_after} frames with pitch > 750Hz")
         
         # ノートセグメンテーション
         notes = self.segment_notes_advanced(pitches, confidences, hop_length)
         
-        # フィルタリング
-        self.notes = self.filter_notes(notes)
+        # セグメンテーション後のデバッグ情報
+        high_notes_seg = [n for n in notes if n.pitch > 600]
+        if high_notes_seg:
+            print(f"After segmentation: {len(high_notes_seg)} notes above 600Hz")
+            highest_seg = max(high_notes_seg, key=lambda n: n.pitch)
+            print(f"Highest segmented note: {highest_seg.notation} ({highest_seg.pitch:.1f}Hz, conf:{highest_seg.confidence:.2f})")
+        
+        # フィルタリング（デバッグモードON）
+        self.notes = self.filter_notes(notes, debug=True)
         
         print(f"Detected {len(self.notes)} valid notes")
         
         return self.notes
         
-    def export_results(self, output_format: str = 'simple'):
+    def export_results(self, output_format: str = 'simple', json_output: str = None):
         """結果を出力"""
         if not self.notes:
             print("No notes detected")
             return
+            
+        # JSON出力
+        if json_output:
+            self.export_json(json_output)
             
         print(f"\n{'='*60}")
         print(f"IMPROVED MELODY EXTRACTION - {self.audio_path.name}")
@@ -353,6 +409,43 @@ class ImprovedMelodyExtractor:
         for note, count in note_counts.most_common(8):
             percentage = (count / len(self.notes)) * 100
             print(f"  {note}: {count} times ({percentage:.1f}%)")
+            
+    def export_json(self, output_path: str):
+        """JSON形式でメロディを出力"""
+        # データクラスを辞書に変換
+        notes_data = []
+        for note in self.notes:
+            note_dict = asdict(note)
+            # 表記を追加
+            note_dict['notation'] = str(note)
+            notes_data.append(note_dict)
+            
+        # メタデータを含む完全なデータ
+        output_data = {
+            'metadata': {
+                'file': str(self.audio_path.name),
+                'tempo': float(self.tempo) if self.tempo else None,
+                'total_notes': len(self.notes),
+                'duration': float(self.notes[-1].start_time + self.notes[-1].duration) if self.notes else 0,
+                'octave_range': {
+                    'min': min(n.octave for n in self.notes) if self.notes else None,
+                    'max': max(n.octave for n in self.notes) if self.notes else None
+                },
+                'average_confidence': float(np.mean([n.confidence for n in self.notes])) if self.notes else 0
+            },
+            'melody': notes_data,
+            'note_sequence': [str(n) for n in self.notes],  # シンプルな音符配列
+            'statistics': {
+                'note_counts': dict(Counter([str(n) for n in self.notes]).most_common()),
+                'octave_distribution': dict(Counter([n.octave for n in self.notes]).most_common())
+            }
+        }
+        
+        # JSONファイルに書き込み
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)
+            
+        print(f"\nJSON output saved to: {output_path}")
 
 
 def main():
@@ -363,6 +456,10 @@ def main():
     parser.add_argument('audio_file', help='音声ファイルのパス')
     parser.add_argument('--format', choices=['simple', 'detailed'], 
                        default='simple', help='出力形式')
+    parser.add_argument('--json', '-j', metavar='OUTPUT_FILE',
+                       help='JSON形式で出力するファイルパス（省略時は自動生成）')
+    parser.add_argument('--auto-json', action='store_true',
+                       help='JSON出力を自動的に行う（melody_output/フォルダに保存）')
     
     args = parser.parse_args()
     
@@ -373,7 +470,23 @@ def main():
     # メロディ抽出
     extractor = ImprovedMelodyExtractor(args.audio_file)
     notes = extractor.extract_melody()
-    extractor.export_results(output_format=args.format)
+    
+    # JSON出力パスの処理
+    json_output = args.json
+    
+    # JSON出力が指定されていない場合は常に自動生成
+    if json_output is None:
+        # 出力フォルダを作成
+        output_dir = Path("melody_output")
+        output_dir.mkdir(exist_ok=True)
+        
+        # タイムスタンプとファイル名から動的なファイル名を生成
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = Path(args.audio_file).stem.replace(" ", "_")
+        json_output = output_dir / f"{base_name}_melody_{timestamp}.json"
+        print(f"Auto-generating JSON output: {json_output}")
+    
+    extractor.export_results(output_format=args.format, json_output=json_output)
 
 
 if __name__ == "__main__":
